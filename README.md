@@ -1,9 +1,16 @@
-# Self-Hosted Translation API on AWS Lambda
+# Self-Hosted Translation API
 
 API de tradução multi-idioma, **self-hosted e gratuita** (sem custo por requisição de API paga
-tipo DeepL/Google Translate), rodando como **AWS Lambda Container Image**, exposta via **Function
-URL**. Traduz textos de 8 idiomas de origem para um idioma alvo (neste exemplo, português
-brasileiro), com detecção automática de idioma.
+tipo DeepL/Google Translate). A lógica de tradução (`translator.py`) não depende de Lambda —
+o repo traz duas formas de expor ela:
+
+- **AWS Lambda Container Image**, via Function URL (`Dockerfile` + `handler.py`) — foco principal
+  deste repo, com métricas reais medidas em produção.
+- **Backend HTTP comum** (FastAPI + uvicorn), via `Dockerfile.server` + `server.py` — pra rodar em
+  qualquer lugar que rode um container: EC2, VPS, Docker Compose, Kubernetes, etc.
+
+Traduz textos de 8 idiomas de origem para um idioma alvo (neste exemplo, português brasileiro),
+com detecção automática de idioma.
 
 **Sem LLM.** Isso não é um wrapper em cima de GPT/Claude/Gemini — é um serviço de tradução
 neural clássico, propósito único, leve o suficiente pra rodar em CPU, dentro do limite de
@@ -39,6 +46,11 @@ texto → langdetect (detecção de idioma)
 | **int8 (quantização)** | Cada peso do modelo (normalmente float32) vira inteiro de 8 bits + fator de escala. Modelo ~4x menor, inferência mais rápida em CPU, perda de qualidade mínima. Aplicado no momento da conversão (`convert.py`), é feature nativa do conversor do CTranslate2. |
 | **Tokenizer (`transformers.AutoTokenizer` + SentencePiece)** | Converte texto ↔ tokens. Em runtime, `transformers` é usado só para isso — sem torch. |
 | **langdetect** | Detecta o idioma de origem. Puro Python, sem numpy/torch (evita problemas de compatibilidade em ambiente serverless). |
+
+`translator.py` concentra toda essa lógica (regra de negócio pura, sem JSON de evento nem status
+HTTP). `handler.py` (Lambda) e `server.py` (FastAPI) são só a camada fina de "encaixe" — parseiam
+a entrada do seu formato específico, chamam `translate_request(body)` e devolvem a resposta no
+formato esperado por cada ambiente. A tradução em si é o mesmo código nos dois casos.
 
 ### Roteamento (pivot por inglês)
 
@@ -119,24 +131,49 @@ Configuração recomendada da função: **Container Image**, memória ≥ 2-3GB,
 Exponha via **Function URL** (`AuthType: NONE` é o mais simples para testar, mas não é
 autenticação — para uso real, prefira `AWS_IAM` ou valide um header secreto no handler).
 
+## Rodando como backend tradicional (sem Lambda)
+
+Mesma lógica de tradução, exposta como API HTTP comum (FastAPI + uvicorn), pra rodar em
+qualquer VPS/EC2/container — sem depender de Lambda, ECR ou Function URL:
+
+```bash
+docker build -f Dockerfile.server -t translation-api:server .
+docker run -d -p 8000:8000 translation-api:server
+```
+
+```bash
+curl -X POST http://localhost:8000/translate \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello world","title":"A quick headline","target":"pb"}'
+```
+
+Resposta é o JSON puro (`translate_request` do `translator.py`), sem envelope de evento nem
+`statusCode` — é HTTP normal, status code já vem certo na resposta (200/400/500). `GET /health`
+devolve `{"status": "ok"}`.
+
+> Não medimos números de performance/cold-start pra esse modo (não testamos em produção) — a
+> seção "Números de performance" abaixo é só do modo Lambda. Em teoria, sem cold start do Lambda
+> a latência tende a ser mais previsível (modelo fica na memória do processo, sem idle timeout
+> forçado), mas isso não foi validado aqui.
+
 ## Adicionando um idioma
 
 Edite `convert.py`: adicione uma entrada em `CANDIDATES` com o(s) modelo(s) Helsinki-NLP
 candidatos pro par `<idioma>-en` (o conversor tenta em ordem até um funcionar). Depois é só
-rebuildar a imagem — o `Dockerfile` já converte tudo de novo no build.
+rebuildar a imagem (`Dockerfile` ou `Dockerfile.server`) — os dois convertem tudo de novo no build.
 
 ```python
 "ja-en": ["Helsinki-NLP/opus-mt-ja-en"],
 ```
 
-E adicione o código do idioma em `_XEN` no `handler.py`.
+E adicione o código do idioma em `_XEN`, em `translator.py`.
 
 **Lição aprendida (grego):** nem sempre o modelo "maior"/mais recente é melhor. O
 `opus-mt-tc-big-el-en` degenera em saída de lixo pra esse par; o `opus-mt-grk-en` (menor, do
 grupo de línguas gregas) funciona bem e é mais rápido. Sempre valide a saída de um par novo
 antes de assumir que "só está lento".
 
-## Números de performance (textos ~5k caracteres)
+## Números de performance (textos ~5k caracteres, modo Lambda)
 
 | Regime | Tempo | Quando |
 |---|---|---|

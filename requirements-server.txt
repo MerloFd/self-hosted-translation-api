@@ -1,0 +1,7 @@
+ctranslate2
+transformers
+sentencepiece
+sacremoses
+langdetect
+fastapi
+uvicorn[standard]

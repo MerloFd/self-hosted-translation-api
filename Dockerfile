@@ -1,5 +1,6 @@
 FROM public.ecr.aws/lambda/python:3.12
 
+COPY translator.py ${LAMBDA_TASK_ROOT}/translator.py
 COPY handler.py ${LAMBDA_TASK_ROOT}/handler.py
 COPY convert.py /tmp/convert.py
 
